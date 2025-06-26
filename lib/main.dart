@@ -1,55 +1,85 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'bluetooth_printer_helper.dart'; // 👈 Add this import
+import 'bluetooth_printer_helper.dart';
+import 'image_processing_helper.dart';
 
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  final cameras = await availableCameras();
-  final firstCamera = cameras.first;
-
-  runApp(MaterialApp(home: CameraApp(camera: firstCamera)));
+void main() {
+  runApp(MaterialApp(home: CameraApp()));
 }
 
 class CameraApp extends StatefulWidget {
-  final CameraDescription camera;
-  const CameraApp({Key? key, required this.camera}) : super(key: key);
+  const CameraApp({Key? key}) : super(key: key);
 
   @override
   State<CameraApp> createState() => _CameraAppState();
 }
 
 class _CameraAppState extends State<CameraApp> {
-  late CameraController _controller;
-  late Future<void> _initializeControllerFuture;
-  XFile? _capturedImage;
-
+  List<CameraDescription> _cameras = [];
+  CameraController? _controller;
+  Future<void>? _initializeControllerFuture;
+  XFile? _ditheredImage;
   int _countdown = 0;
   Timer? _timer;
   bool _isCountingDown = false;
+  int _cameraIndex = 0;
+  bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _controller = CameraController(
-      widget.camera,
-      ResolutionPreset.medium,
-      enableAudio: false,
-    );
-    _initializeControllerFuture = _controller.initialize();
+    _initCameras();
   }
 
-  @override
-  void dispose() {
-    _timer?.cancel();
-    _controller.dispose();
-    super.dispose();
+  Future<void> _initCameras() async {
+    _cameras = await availableCameras();
+    if (_cameras.isNotEmpty) {
+      _cameraIndex = 0;
+      _initializeCamera();
+    } else {
+      print('No cameras found');
+    }
+  }
+
+  void _initializeCamera() {
+    _controller = CameraController(
+      _cameras[_cameraIndex],
+      ResolutionPreset.medium,
+      enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.jpeg,
+    );
+
+    _initializeControllerFuture = _controller!
+        .initialize()
+        .then((_) {
+          setState(() {
+            _isLoading = false;
+          });
+        })
+        .catchError((e) {
+          print("Camera init error: $e");
+        });
+  }
+
+  void _switchCamera() {
+    if (_cameras.length < 2) return;
+
+    setState(() {
+      _isLoading = true;
+      _cameraIndex = (_cameraIndex + 1) % _cameras.length;
+    });
+
+    _controller?.dispose().then((_) {
+      _initializeCamera();
+    });
   }
 
   void startCountdown() {
     setState(() {
-      _countdown = 5;
+      _countdown = 3;
       _isCountingDown = true;
     });
 
@@ -69,14 +99,31 @@ class _CameraAppState extends State<CameraApp> {
 
   Future<void> capturePhoto() async {
     try {
+      if (_controller == null || !_controller!.value.isInitialized) {
+        print("Camera not ready");
+        return;
+      }
+
       await _initializeControllerFuture;
-      final image = await _controller.takePicture();
+      final rawImage = await _controller!.takePicture();
+      final ditheredPath = await ImageProcessingHelper.processImage(
+        rawImage.path,
+        flip: _cameras[_cameraIndex].lensDirection == CameraLensDirection.front,
+      );
       setState(() {
-        _capturedImage = image;
+        _ditheredImage = XFile(ditheredPath);
       });
-    } catch (e) {
-      print('Error capturing photo: $e');
+    } catch (e, stack) {
+      print('Error capturing or processing photo: $e');
+      print(stack);
     }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _controller?.dispose();
+    super.dispose();
   }
 
   @override
@@ -84,10 +131,10 @@ class _CameraAppState extends State<CameraApp> {
     return Scaffold(
       backgroundColor: Colors.black,
       body:
-          _capturedImage != null
+          _ditheredImage != null
               ? Column(
                 children: [
-                  Expanded(child: Image.file(File(_capturedImage!.path))),
+                  Expanded(child: Image.file(File(_ditheredImage!.path))),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
@@ -97,7 +144,7 @@ class _CameraAppState extends State<CameraApp> {
                         onPressed: () async {
                           final helper = BluetoothPrinterHelper();
                           await helper.initPrinter();
-                          await helper.printImage(_capturedImage!.path);
+                          await helper.printImage(_ditheredImage!.path);
                         },
                       ),
                       ElevatedButton.icon(
@@ -105,7 +152,7 @@ class _CameraAppState extends State<CameraApp> {
                         label: Text("Retake"),
                         onPressed: () {
                           setState(() {
-                            _capturedImage = null;
+                            _ditheredImage = null;
                           });
                         },
                       ),
@@ -113,18 +160,27 @@ class _CameraAppState extends State<CameraApp> {
                   ),
                 ],
               )
-              : FutureBuilder<void>(
+              : _isLoading || _controller == null
+              ? Center(child: CircularProgressIndicator())
+              : FutureBuilder(
                 future: _initializeControllerFuture,
                 builder: (context, snapshot) {
                   if (snapshot.connectionState == ConnectionState.done) {
                     return Column(
                       children: [
-                        // Camera preview - 2/3 of screen
                         Expanded(
                           flex: 2,
                           child: Stack(
                             children: [
-                              CameraPreview(_controller),
+                              Transform(
+                                alignment: Alignment.center,
+                                transform:
+                                    _cameras[_cameraIndex].lensDirection ==
+                                            CameraLensDirection.front
+                                        ? Matrix4.rotationY(math.pi)
+                                        : Matrix4.identity(),
+                                child: CameraPreview(_controller!),
+                              ),
                               if (_isCountingDown)
                                 Center(
                                   child: Text(
@@ -146,8 +202,6 @@ class _CameraAppState extends State<CameraApp> {
                             ],
                           ),
                         ),
-
-                        // Bottom 1/3 with quote and capture button
                         Expanded(
                           flex: 1,
                           child: Container(
@@ -160,13 +214,21 @@ class _CameraAppState extends State<CameraApp> {
                               children: [
                                 Expanded(
                                   child: Text(
-                                    '"Smile, it\'s a beautiful moment!"',
+                                    '"What a day to smile"',
                                     style: TextStyle(
                                       color: Colors.white,
                                       fontStyle: FontStyle.italic,
                                       fontSize: 18,
                                     ),
                                   ),
+                                ),
+                                IconButton(
+                                  iconSize: 48,
+                                  icon: Icon(
+                                    Icons.cameraswitch,
+                                    color: Colors.white,
+                                  ),
+                                  onPressed: _switchCamera,
                                 ),
                                 IconButton(
                                   iconSize: 48,

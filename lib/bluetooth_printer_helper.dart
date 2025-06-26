@@ -1,8 +1,8 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:blue_thermal_printer/blue_thermal_printer.dart';
 import 'package:image/image.dart' as img;
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
-import 'dart:typed_data'; // <-- Add this at the top
 
 class BluetoothPrinterHelper {
   final BlueThermalPrinter printer = BlueThermalPrinter.instance;
@@ -11,7 +11,7 @@ class BluetoothPrinterHelper {
     bool isConnected = await printer.isConnected ?? false;
     if (!isConnected) {
       List<BluetoothDevice> devices = await printer.getBondedDevices();
-      // Try to auto-select MPT-II or the first available device
+      // Auto-connect to MPT-II or first paired device
       BluetoothDevice? target = devices.firstWhere(
         (d) => d.name?.toUpperCase().contains('MPT-II') ?? false,
         orElse: () => devices.first,
@@ -25,7 +25,7 @@ class BluetoothPrinterHelper {
     img.Image? image = img.decodeImage(bytes);
     if (image == null) return;
 
-    // Resize image to printer width (MPT-II is usually 384px wide for 58mm paper)
+    // Resize image to printer width
     final resized = img.copyResize(image, width: 384);
     final profile = await CapabilityProfile.load();
     final generator = Generator(PaperSize.mm58, profile);
